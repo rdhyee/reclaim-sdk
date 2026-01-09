@@ -1,5 +1,7 @@
+import json
+
 from pydantic import BaseModel, Field, ConfigDict, PrivateAttr, model_validator, field_validator
-from datetime import datetime, timezone, time
+from datetime import datetime, timezone
 from typing import ClassVar, Dict, List, Optional, Any, Tuple
 from enum import Enum
 from reclaim_sdk.resources.base import BaseResource
@@ -167,8 +169,8 @@ class SmartHabitPeriod(BaseModel):
 class SmartHabitInstance(BaseModel):
     """A single scheduled instance of a Smart Habit on the calendar.
 
-    This is a simplified view used when listing habits via /api/events.
-    For richer data, use SmartHabitPeriod from the /api/smart-habits endpoint.
+    Note: This model is deprecated. Use SmartHabitPeriod instead, which provides
+    richer data from the /api/smart-habits endpoint.
     """
 
     model_config = ConfigDict(
@@ -383,6 +385,10 @@ class SmartHabit(BaseModel):
         periods_data = data.get("periods", [])
         periods = [SmartHabitPeriod.model_validate(p) for p in periods_data]
 
+        # Extract priority from attendees (more defensive)
+        attendees = active_series.get("attendees") or []
+        priority = attendees[0].get("priority", "P2") if attendees else "P2"
+
         # Build flat structure for SmartHabit
         habit_data = {
             "lineageId": data.get("lineageId"),
@@ -393,7 +399,7 @@ class SmartHabit(BaseModel):
             "idealTime": active_series.get("idealTime"),
             "durationMinMins": active_series.get("durationMinMins", 30),
             "durationMaxMins": active_series.get("durationMaxMins", 30),
-            "priority": active_series.get("attendees", [{}])[0].get("priority", "P2") if active_series.get("attendees") else "P2",
+            "priority": priority,
             "eventType": active_series.get("eventType", "SOLO_WORK"),
             "defenseAggression": active_series.get("defenseAggression", "DEFAULT"),
             "autoDecline": active_series.get("autoDecline", False),
@@ -431,12 +437,15 @@ class SmartHabit(BaseModel):
         if self._client is None:
             self._client = ReclaimClient()
 
-        # Build update payload
+        # Build update payload with all updatable fields
         update_data = {
             "title": self.title,
             "description": self.description,
             "durationMinMins": self.duration_min,
             "durationMaxMins": self.duration_max,
+            "priority": self.priority,
+            "eventType": self.event_type.value,
+            "defenseAggression": self.defense_aggression.value,
             "autoDecline": self.auto_decline,
         }
 
@@ -459,10 +468,10 @@ class SmartHabit(BaseModel):
         if self._client is None:
             self._client = ReclaimClient()
 
-        # Enable endpoint may return empty response
+        # Enable endpoint may return empty response (valid success)
         try:
             self._client.post(f"{self.ENDPOINT}/{self.lineage_id}/enable")
-        except Exception:
+        except json.JSONDecodeError:
             pass  # Endpoint succeeded but returned empty body
         self.status = HabitStatus.ACTIVE
 
@@ -471,10 +480,10 @@ class SmartHabit(BaseModel):
         if self._client is None:
             self._client = ReclaimClient()
 
-        # Disable endpoint may return empty response
+        # Disable endpoint may return empty response (valid success)
         try:
             self._client.delete(f"{self.ENDPOINT}/{self.lineage_id}/disable")
-        except Exception:
+        except json.JSONDecodeError:
             pass  # Endpoint succeeded but returned empty body
         self.status = HabitStatus.DISABLED
 

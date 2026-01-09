@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field, ConfigDict, PrivateAttr, model_validator, field_validator
 from datetime import datetime, timezone
-from typing import ClassVar, Dict, List, Optional, Any, Tuple, Literal
+from typing import ClassVar, Dict, List, Optional, Any, Tuple
 from enum import Enum
 from reclaim_sdk.resources.base import BaseResource
 from reclaim_sdk.client import ReclaimClient

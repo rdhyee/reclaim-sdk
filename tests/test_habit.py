@@ -84,6 +84,38 @@ class TestSmartHabitUnit:
             habit.title = "New Title"
 
     @pytest.mark.unit
+    def test_smart_habit_instance_timezone_aware_from_naive(self):
+        """SmartHabitInstance field_validator converts naive datetimes to UTC."""
+        # Create with naive datetimes
+        instance = SmartHabitInstance(
+            event_id="e1",
+            calendar_id=1,
+            start=datetime(2024, 1, 1, 9, 0),  # naive
+            end=datetime(2024, 1, 1, 10, 0),  # naive
+            status="PUBLISHED",
+            pinned=False,
+        )
+        # Should be converted to UTC
+        assert instance.start.tzinfo == timezone.utc
+        assert instance.end.tzinfo == timezone.utc
+
+    @pytest.mark.unit
+    def test_smart_habit_instance_timezone_preserves_aware(self):
+        """SmartHabitInstance field_validator preserves existing timezone."""
+        from datetime import timezone as tz
+        # Create with already-aware datetimes
+        instance = SmartHabitInstance(
+            event_id="e1",
+            calendar_id=1,
+            start=datetime(2024, 1, 1, 9, 0, tzinfo=tz.utc),
+            end=datetime(2024, 1, 1, 10, 0, tzinfo=tz.utc),
+            status="PUBLISHED",
+            pinned=False,
+        )
+        assert instance.start.tzinfo == tz.utc
+        assert instance.end.tzinfo == tz.utc
+
+    @pytest.mark.unit
     def test_changelog_entry_reason_enum(self):
         """HabitChangeLogEntry uses ChangeReason enum."""
         entry = HabitChangeLogEntry(
@@ -129,7 +161,7 @@ class TestSmartHabitIntegration:
             assert hasattr(h, "category")
             assert hasattr(h, "color")
             assert hasattr(h, "instances")
-            assert h.category in ("WORK", "PERSONAL")
+            assert h.category in (EventCategory.WORK, EventCategory.PERSONAL)
 
     @pytest.mark.integration
     def test_smart_habit_get_by_title(self, client):

@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, ConfigDict, PrivateAttr, model_validator, field_validator
-from datetime import datetime, timezone
+from datetime import datetime, timezone, time
 from typing import ClassVar, Dict, List, Optional, Any, Tuple
 from enum import Enum
 from reclaim_sdk.resources.base import BaseResource
@@ -21,7 +21,6 @@ class ChangeReason(str, Enum):
     SMART_SERIES_EVENT_REMOVED_DUE_TO_NO_TIME = "SMART_SERIES_EVENT_REMOVED_DUE_TO_NO_TIME"
     SMART_SERIES_EVENT_DURATION_CHANGED = "SMART_SERIES_EVENT_DURATION_CHANGED"
     SMART_SERIES_EVENT_UPDATED = "SMART_SERIES_EVENT_UPDATED"
-    # Catch-all for unknown reasons from API
     UNKNOWN = "UNKNOWN"
 
 
@@ -29,6 +28,34 @@ class EventCategory(str, Enum):
     """Event category for habits."""
     WORK = "WORK"
     PERSONAL = "PERSONAL"
+
+
+class HabitStatus(str, Enum):
+    """Status of a Smart Habit."""
+    ACTIVE = "ACTIVE"
+    DISABLED = "DISABLED"
+
+
+class RecurrenceFrequency(str, Enum):
+    """Frequency of habit recurrence."""
+    DAILY = "DAILY"
+    WEEKLY = "WEEKLY"
+    MONTHLY = "MONTHLY"
+
+
+class EventType(str, Enum):
+    """Type of calendar event."""
+    SOLO_WORK = "SOLO_WORK"
+    FOCUS_TIME = "FOCUS_TIME"
+    MEETING = "MEETING"
+    PERSONAL = "PERSONAL"
+
+
+class DefenseAggression(str, Enum):
+    """How aggressively to defend the habit time."""
+    DEFAULT = "DEFAULT"
+    AGGRESSIVE = "AGGRESSIVE"
+    PASSIVE = "PASSIVE"
 
 
 class Habit(BaseResource):
@@ -81,8 +108,68 @@ class Habit(BaseResource):
             self._update_from_response(response["taskOrHabit"])
 
 
+class HabitRecurrence(BaseModel):
+    """Recurrence configuration for a Smart Habit."""
+
+    model_config = ConfigDict(
+        populate_by_name=True,
+        extra="ignore",
+    )
+
+    frequency: RecurrenceFrequency = Field(RecurrenceFrequency.WEEKLY, description="Recurrence frequency")
+    ideal_days: List[str] = Field(default_factory=list, alias="idealDays", description="Preferred days (MONDAY, TUESDAY, etc.)")
+    interval: int = Field(1, description="Interval between occurrences")
+    days_between_periods: int = Field(1, alias="daysBetweenPeriods", description="Minimum days between periods")
+
+
+class SmartHabitPeriod(BaseModel):
+    """A scheduled period/instance of a Smart Habit."""
+
+    model_config = ConfigDict(
+        populate_by_name=True,
+        extra="ignore",
+    )
+
+    event_key: str = Field(..., alias="eventKey", description="Unique event key")
+    series_id: int = Field(..., alias="seriesId", description="Series ID")
+    start: str = Field(..., description="Period start date (YYYY-MM-DD)")
+    end: str = Field(..., description="Period end date (YYYY-MM-DD)")
+    done: bool = Field(False, description="Whether period is completed")
+    locked: bool = Field(False, description="Whether period is locked/pinned")
+    event_start: Optional[datetime] = Field(None, alias="eventStart", description="Scheduled event start time")
+    event_end: Optional[datetime] = Field(None, alias="eventEnd", description="Scheduled event end time")
+    event_status: str = Field("NONE", alias="eventStatus", description="Event status (DONE, NONE, PUBLISHED)")
+    scheduler_status: str = Field("NOT_SKIPPED", alias="schedulerStatus", description="Scheduler status")
+    scheduler_skipped: bool = Field(False, alias="schedulerSkipped", description="Whether scheduler skipped this")
+
+    @field_validator("event_start", "event_end", mode="before")
+    @classmethod
+    def parse_datetime(cls, v: Any) -> Optional[datetime]:
+        """Parse datetime strings, return None for missing values."""
+        if v is None:
+            return None
+        if isinstance(v, datetime):
+            if v.tzinfo is None:
+                return v.replace(tzinfo=timezone.utc)
+            return v
+        if isinstance(v, str):
+            # Parse ISO format datetime
+            try:
+                dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt
+            except ValueError:
+                return None
+        return None
+
+
 class SmartHabitInstance(BaseModel):
-    """A single scheduled instance of a Smart Habit on the calendar."""
+    """A single scheduled instance of a Smart Habit on the calendar.
+
+    This is a simplified view used when listing habits via /api/events.
+    For richer data, use SmartHabitPeriod from the /api/smart-habits endpoint.
+    """
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -117,139 +204,204 @@ class SmartHabitInstance(BaseModel):
 
 class SmartHabit(BaseModel):
     """
-    Smart Habit extracted from calendar events.
+    Smart Habit resource with full CRUD support.
 
     Smart Habits are the current active habit system in Reclaim.ai.
-    They don't have a direct CRUD API - we extract them from scheduled events.
+    This class uses the /api/smart-habits endpoint for full access.
 
     Usage:
+        # List all habits
         habits = SmartHabit.list()
-        for habit in habits:
-            print(f"{habit.title}: {len(habit.instances)} scheduled instances")
+
+        # Get a specific habit
+        habit = SmartHabit.get(lineage_id)
+
+        # Update a habit
+        habit.title = "New Title"
+        habit.save()
+
+        # Disable/Enable
+        habit.disable()
+        habit.enable()
     """
 
     model_config = ConfigDict(
         populate_by_name=True,
         extra="ignore",
-        frozen=True,  # SmartHabit is read-only
+        validate_assignment=True,
     )
 
-    series_id: int = Field(..., alias="seriesId", description="Smart series lineage ID")
-    title: str = Field(..., description="Habit title (without status emoji)")
-    category: EventCategory = Field(..., description="WORK or PERSONAL")
-    color: Optional[str] = Field(None, description="Calendar color")
-    instances: List[SmartHabitInstance] = Field(default_factory=list, description="Scheduled instances")
+    ENDPOINT: ClassVar[str] = "/api/smart-habits"
 
-    # Store client reference for subsequent API calls
+    # Core identifiers
+    lineage_id: int = Field(..., alias="lineageId", description="Smart series lineage ID (primary identifier)")
+    calendar_id: int = Field(..., alias="calendarId", description="Calendar ID")
+    status: HabitStatus = Field(HabitStatus.ACTIVE, description="Habit status (ACTIVE/DISABLED)")
+
+    # Main habit properties (from activeSeries)
+    title: str = Field(..., description="Habit title")
+    description: str = Field("", description="Habit description")
+    ideal_time: Optional[str] = Field(None, alias="idealTime", description="Ideal time of day (HH:MM:SS)")
+    duration_min: int = Field(30, alias="durationMinMins", description="Minimum duration in minutes")
+    duration_max: int = Field(30, alias="durationMaxMins", description="Maximum duration in minutes")
+    priority: str = Field("P2", description="Priority (P1-P4)")
+    event_type: EventType = Field(EventType.SOLO_WORK, alias="eventType", description="Event type")
+    defense_aggression: DefenseAggression = Field(DefenseAggression.DEFAULT, alias="defenseAggression")
+    auto_decline: bool = Field(False, alias="autoDecline", description="Auto-decline conflicts")
+    recurrence: Optional[HabitRecurrence] = Field(None, description="Recurrence configuration")
+
+    # Scheduling periods
+    periods: List[SmartHabitPeriod] = Field(default_factory=list, description="Scheduled periods")
+
+    # For backward compatibility with old API
+    instances: List[SmartHabitInstance] = Field(default_factory=list, description="Legacy instances (deprecated)")
+
+    # Private client reference
     _client: Optional[ReclaimClient] = PrivateAttr(default=None)
 
+    # Backward compatibility alias
     @property
-    def next_instance(self) -> Optional[SmartHabitInstance]:
-        """Get the next scheduled instance."""
-        if not self.instances:
+    def series_id(self) -> int:
+        """Alias for lineage_id for backward compatibility."""
+        return self.lineage_id
+
+    @property
+    def category(self) -> EventCategory:
+        """Infer category from event_type for backward compatibility."""
+        if self.event_type == EventType.PERSONAL:
+            return EventCategory.PERSONAL
+        return EventCategory.WORK
+
+    @property
+    def next_period(self) -> Optional[SmartHabitPeriod]:
+        """Get the next scheduled period."""
+        if not self.periods:
             return None
 
         now = datetime.now(timezone.utc)
 
-        # Filter future instances (timezone awareness guaranteed by field_validator)
+        # Find future periods with scheduled times
+        future = [p for p in self.periods if p.event_start and p.event_start > now and not p.done]
+
+        if future:
+            return min(future, key=lambda x: x.event_start)
+
+        return None
+
+    @property
+    def next_instance(self) -> Optional[SmartHabitInstance]:
+        """Get the next scheduled instance (backward compatibility)."""
+        if not self.instances:
+            return None
+
+        now = datetime.now(timezone.utc)
         future = [i for i in self.instances if i.start > now]
 
         if future:
             return min(future, key=lambda x: x.start)
 
-        # If no future instances, return the most recent
-        return max(self.instances, key=lambda x: x.start)
+        return max(self.instances, key=lambda x: x.start) if self.instances else None
 
     @property
     def instance_count(self) -> int:
-        """Number of scheduled instances."""
-        return len(self.instances)
+        """Number of scheduled instances/periods."""
+        return len(self.periods) if self.periods else len(self.instances)
+
+    @property
+    def is_enabled(self) -> bool:
+        """Check if habit is enabled."""
+        return self.status == HabitStatus.ACTIVE
 
     @classmethod
-    def list(
-        cls,
-        client: Optional[ReclaimClient] = None,
-        start: Optional[datetime] = None,
-        end: Optional[datetime] = None,
-    ) -> List["SmartHabit"]:
+    def _get_client(cls, client: Optional[ReclaimClient] = None) -> ReclaimClient:
+        """Get client instance."""
+        return client if client is not None else ReclaimClient()
+
+    @classmethod
+    def get(cls, lineage_id: int, client: Optional[ReclaimClient] = None) -> "SmartHabit":
         """
-        List all Smart Habits by extracting from calendar events.
+        Fetch a Smart Habit by lineage ID.
 
         Args:
-            client: Optional client instance. If provided, it will be bound
-                   to returned SmartHabit instances for subsequent API calls.
-            start: Optional start datetime for filtering events. If not provided,
-                   uses the API's default range.
-            end: Optional end datetime for filtering events. If not provided,
-                 uses the API's default range.
+            lineage_id: The habit's lineage ID
+            client: Optional client instance
 
         Returns:
-            List of SmartHabit objects with their scheduled instances.
+            SmartHabit instance
         """
-        if client is None:
-            client = ReclaimClient()
+        client = cls._get_client(client)
 
-        # Build query params for date range filtering
-        params: Dict[str, str] = {}
-        if start is not None:
-            params["start"] = start.isoformat()
-        if end is not None:
-            params["end"] = end.isoformat()
+        # The API returns the habit in the list format, so we fetch all and filter
+        # (There's no direct GET /api/smart-habits/{id} endpoint)
+        data_list = client.get(cls.ENDPOINT)
 
-        events = client.get("/api/events", params=params if params else None)
+        for data in data_list:
+            if data.get("lineageId") == lineage_id:
+                habit = cls._from_api_response(data)
+                habit._client = client
+                return habit
 
-        # Group events by series lineage ID
-        habits_map: Dict[int, Dict[str, Any]] = {}
+        from reclaim_sdk.exceptions import RecordNotFound
+        raise RecordNotFound(f"SmartHabit with lineage_id {lineage_id} not found")
 
-        for event in events:
-            if event.get("reclaimEventType") != "SMART_HABIT":
-                continue
+    @classmethod
+    def list(cls, client: Optional[ReclaimClient] = None) -> List["SmartHabit"]:
+        """
+        List all Smart Habits.
 
-            assist = event.get("assist", {})
-            series_id = assist.get("seriesLineageId")
+        Args:
+            client: Optional client instance
 
-            # Use `is None` check to allow series_id=0 (though unlikely)
-            if series_id is None:
-                continue
+        Returns:
+            List of SmartHabit objects
+        """
+        client = cls._get_client(client)
+        data_list = client.get(cls.ENDPOINT)
 
-            if series_id not in habits_map:
-                # Clean title (remove status emoji prefix)
-                title = event.get("title", "")
-                # Common status prefixes used by Reclaim
-                status_prefixes = ["✅ ", "🔒 ", "⏸️ ", "⏭️ ", "🔄 "]
-                for prefix in status_prefixes:
-                    if title.startswith(prefix):
-                        title = title[len(prefix):]
-                        break
-
-                # Parse category as enum, default to WORK
-                category_str = event.get("type", "WORK")
-                try:
-                    category = EventCategory(category_str)
-                except ValueError:
-                    category = EventCategory.WORK
-
-                habits_map[series_id] = {
-                    "series_id": series_id,
-                    "title": title,
-                    "category": category,
-                    "color": event.get("color"),
-                    "instances": [],
-                }
-
-            # Use model_validate for proper parsing
-            instance = SmartHabitInstance.model_validate(event)
-            habits_map[series_id]["instances"].append(instance)
-
-        # Convert to SmartHabit objects and bind client
         habits = []
-        for data in habits_map.values():
-            habit = cls.model_validate(data)
-            # Bind client for subsequent API calls (bypass frozen with object.__setattr__)
-            object.__setattr__(habit, "_client", client)
+        for data in data_list:
+            habit = cls._from_api_response(data)
+            habit._client = client
             habits.append(habit)
 
         return habits
+
+    @classmethod
+    def _from_api_response(cls, data: Dict[str, Any]) -> "SmartHabit":
+        """
+        Create SmartHabit from API response.
+
+        The API returns a nested structure with activeSeries containing the main data.
+        """
+        active_series = data.get("activeSeries", {})
+
+        # Extract recurrence
+        recurrence_data = active_series.get("recurrence")
+        recurrence = HabitRecurrence.model_validate(recurrence_data) if recurrence_data else None
+
+        # Extract periods
+        periods_data = data.get("periods", [])
+        periods = [SmartHabitPeriod.model_validate(p) for p in periods_data]
+
+        # Build flat structure for SmartHabit
+        habit_data = {
+            "lineageId": data.get("lineageId"),
+            "calendarId": data.get("calendarId"),
+            "status": data.get("status", "ACTIVE"),
+            "title": active_series.get("title", ""),
+            "description": active_series.get("description", ""),
+            "idealTime": active_series.get("idealTime"),
+            "durationMinMins": active_series.get("durationMinMins", 30),
+            "durationMaxMins": active_series.get("durationMaxMins", 30),
+            "priority": active_series.get("attendees", [{}])[0].get("priority", "P2") if active_series.get("attendees") else "P2",
+            "eventType": active_series.get("eventType", "SOLO_WORK"),
+            "defenseAggression": active_series.get("defenseAggression", "DEFAULT"),
+            "autoDecline": active_series.get("autoDecline", False),
+            "recurrence": recurrence,
+            "periods": periods,
+        }
+
+        return cls.model_validate(habit_data)
 
     @classmethod
     def get_by_title(cls, title: str, client: Optional[ReclaimClient] = None) -> Optional["SmartHabit"]:
@@ -270,6 +422,72 @@ class SmartHabit(BaseModel):
                 return habit
         return None
 
+    def save(self) -> None:
+        """
+        Save changes to this habit.
+
+        Uses PATCH to update the habit on the server.
+        """
+        if self._client is None:
+            self._client = ReclaimClient()
+
+        # Build update payload
+        update_data = {
+            "title": self.title,
+            "description": self.description,
+            "durationMinMins": self.duration_min,
+            "durationMaxMins": self.duration_max,
+            "autoDecline": self.auto_decline,
+        }
+
+        if self.ideal_time:
+            update_data["idealTime"] = self.ideal_time
+
+        if self.recurrence:
+            update_data["recurrence"] = self.recurrence.model_dump(by_alias=True)
+
+        response = self._client.patch(f"{self.ENDPOINT}/{self.lineage_id}", json=update_data)
+
+        # Update self from response
+        updated = self._from_api_response(response)
+        for field_name in self.model_fields:
+            if field_name not in ("_client",):
+                setattr(self, field_name, getattr(updated, field_name))
+
+    def enable(self) -> None:
+        """Enable this habit."""
+        if self._client is None:
+            self._client = ReclaimClient()
+
+        # Enable endpoint may return empty response
+        try:
+            self._client.post(f"{self.ENDPOINT}/{self.lineage_id}/enable")
+        except Exception:
+            pass  # Endpoint succeeded but returned empty body
+        self.status = HabitStatus.ACTIVE
+
+    def disable(self) -> None:
+        """Disable this habit."""
+        if self._client is None:
+            self._client = ReclaimClient()
+
+        # Disable endpoint may return empty response
+        try:
+            self._client.delete(f"{self.ENDPOINT}/{self.lineage_id}/disable")
+        except Exception:
+            pass  # Endpoint succeeded but returned empty body
+        self.status = HabitStatus.DISABLED
+
+    def refresh(self) -> None:
+        """Refresh this habit from the server."""
+        if self._client is None:
+            self._client = ReclaimClient()
+
+        refreshed = self.get(self.lineage_id, self._client)
+        for field_name in self.model_fields:
+            if field_name not in ("_client",):
+                setattr(self, field_name, getattr(refreshed, field_name))
+
     def get_changelog(self, client: Optional[ReclaimClient] = None, limit: int = 50) -> List["HabitChangeLogEntry"]:
         """
         Get the scheduling changelog for this habit.
@@ -283,16 +501,12 @@ class SmartHabit(BaseModel):
         Returns:
             List of HabitChangeLogEntry objects sorted by date (newest first)
         """
-        # Use bound client, passed client, or singleton (in that order)
         if client is None:
             client = self._client if self._client is not None else ReclaimClient()
 
-        entries = client.get(f"/api/changelog/smart-habits?lineageIds={self.series_id}")
+        entries = client.get(f"/api/changelog/smart-habits?lineageIds={self.lineage_id}")
 
-        # Parse all entries first
         parsed = [HabitChangeLogEntry.model_validate(e) for e in entries]
-
-        # Sort by changed_at descending (newest first), then limit
         parsed.sort(key=lambda x: x.changed_at, reverse=True)
 
         return parsed[:limit]
@@ -320,7 +534,7 @@ class SmartHabit(BaseModel):
 
         if series_ids is None:
             habits = cls.list(client)
-            series_ids = [h.series_id for h in habits]
+            series_ids = [h.lineage_id for h in habits]
 
         if not series_ids:
             return []
@@ -328,19 +542,17 @@ class SmartHabit(BaseModel):
         ids_param = ",".join(str(sid) for sid in series_ids)
         entries = client.get(f"/api/changelog/smart-habits?lineageIds={ids_param}")
 
-        # Parse all entries
         parsed = [HabitChangeLogEntry.model_validate(e) for e in entries]
-
-        # Sort by changed_at descending, then limit
         parsed.sort(key=lambda x: x.changed_at, reverse=True)
 
         return parsed[:limit]
 
     def __str__(self) -> str:
-        return f"SmartHabit('{self.title}', {self.instance_count} instances)"
+        status_str = "enabled" if self.is_enabled else "disabled"
+        return f"SmartHabit('{self.title}', {status_str}, {self.instance_count} periods)"
 
     def __repr__(self) -> str:
-        return f"SmartHabit(series_id={self.series_id}, title='{self.title}', category='{self.category.value}', instances={self.instance_count})"
+        return f"SmartHabit(lineage_id={self.lineage_id}, title='{self.title}', status='{self.status.value}')"
 
 
 class HabitChangeLogEntry(BaseModel):
@@ -373,18 +585,15 @@ class HabitChangeLogEntry(BaseModel):
     def extract_move_metadata(cls, data: Dict[str, Any]) -> Dict[str, Any]:
         """Extract move metadata from nested eventMovedMetadata if present."""
         if isinstance(data, dict):
-            # Handle unknown reason values gracefully
             reason = data.get("reason")
             if reason and isinstance(reason, str):
                 try:
                     ChangeReason(reason)
                 except ValueError:
-                    # Unknown reason - use UNKNOWN
                     data["reason"] = ChangeReason.UNKNOWN.value
 
             move_meta = data.get("eventMovedMetadata", {})
             if isinstance(move_meta, dict):
-                # Only set if not already present (allow override)
                 if "previous_start" not in data and "previousStart" not in data:
                     data["previous_start"] = move_meta.get("previousStart")
                 if "previous_end" not in data and "previousEnd" not in data:

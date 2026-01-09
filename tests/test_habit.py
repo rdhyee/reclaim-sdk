@@ -180,6 +180,175 @@ class TestSmartHabitUnit:
         assert entry.is_move is True
         assert entry.is_create is False
 
+    @pytest.mark.unit
+    def test_from_api_response_basic(self):
+        """_from_api_response parses basic API response."""
+        api_data = {
+            "lineageId": 123,
+            "calendarId": 1,
+            "status": "ACTIVE",
+            "activeSeries": {
+                "title": "Morning Workout",
+                "description": "Daily exercise",
+                "eventType": "PERSONAL",
+                "durationMinMins": 45,
+                "durationMaxMins": 60,
+                "defenseAggression": "AGGRESSIVE",
+            },
+            "periods": [],
+        }
+        habit = SmartHabit._from_api_response(api_data)
+        assert habit.lineage_id == 123
+        assert habit.calendar_id == 1
+        assert habit.title == "Morning Workout"
+        assert habit.description == "Daily exercise"
+        assert habit.event_type == EventType.PERSONAL
+        assert habit.duration_min == 45
+        assert habit.duration_max == 60
+
+    @pytest.mark.unit
+    def test_from_api_response_with_periods(self):
+        """_from_api_response parses periods correctly."""
+        api_data = {
+            "lineageId": 456,
+            "calendarId": 2,
+            "status": "ACTIVE",
+            "activeSeries": {
+                "title": "Reading",
+                "eventType": "SOLO_WORK",
+            },
+            "periods": [
+                {
+                    "eventKey": "key1",
+                    "seriesId": 456,
+                    "start": "2024-01-15",
+                    "end": "2024-01-15",
+                    "eventStart": "2024-01-15T10:00:00Z",
+                    "eventEnd": "2024-01-15T11:00:00Z",
+                    "done": False,
+                    "locked": True,
+                },
+            ],
+        }
+        habit = SmartHabit._from_api_response(api_data)
+        assert len(habit.periods) == 1
+        assert habit.periods[0].event_key == "key1"
+        assert habit.periods[0].locked is True
+        assert habit.periods[0].event_start is not None
+
+    @pytest.mark.unit
+    def test_from_api_response_with_recurrence(self):
+        """_from_api_response parses recurrence correctly."""
+        api_data = {
+            "lineageId": 789,
+            "calendarId": 1,
+            "status": "ACTIVE",
+            "activeSeries": {
+                "title": "Weekly Review",
+                "eventType": "SOLO_WORK",
+                "recurrence": {
+                    "frequency": "WEEKLY",
+                    "idealDays": ["MONDAY", "FRIDAY"],
+                    "interval": 1,
+                    "daysBetweenPeriods": 2,
+                },
+            },
+            "periods": [],
+        }
+        habit = SmartHabit._from_api_response(api_data)
+        assert habit.recurrence is not None
+        assert habit.recurrence.frequency == RecurrenceFrequency.WEEKLY
+        assert habit.recurrence.ideal_days == ["MONDAY", "FRIDAY"]
+        assert habit.recurrence.interval == 1
+
+    @pytest.mark.unit
+    def test_from_api_response_priority_from_attendees(self):
+        """_from_api_response extracts priority from attendees."""
+        api_data = {
+            "lineageId": 100,
+            "calendarId": 1,
+            "status": "ACTIVE",
+            "activeSeries": {
+                "title": "Important Task",
+                "eventType": "SOLO_WORK",
+                "attendees": [
+                    {"priority": "P1"},
+                ],
+            },
+            "periods": [],
+        }
+        habit = SmartHabit._from_api_response(api_data)
+        assert habit.priority == "P1"
+
+    @pytest.mark.unit
+    def test_from_api_response_priority_default_no_attendees(self):
+        """_from_api_response defaults priority when no attendees."""
+        api_data = {
+            "lineageId": 101,
+            "calendarId": 1,
+            "status": "ACTIVE",
+            "activeSeries": {
+                "title": "Basic Task",
+                "eventType": "SOLO_WORK",
+            },
+            "periods": [],
+        }
+        habit = SmartHabit._from_api_response(api_data)
+        assert habit.priority == "P2"
+
+    @pytest.mark.unit
+    def test_from_api_response_disabled_status(self):
+        """_from_api_response handles disabled status."""
+        api_data = {
+            "lineageId": 102,
+            "calendarId": 1,
+            "status": "DISABLED",
+            "activeSeries": {
+                "title": "Disabled Habit",
+                "eventType": "SOLO_WORK",
+            },
+            "periods": [],
+        }
+        habit = SmartHabit._from_api_response(api_data)
+        assert habit.status == HabitStatus.DISABLED
+        assert habit.is_enabled is False
+
+    @pytest.mark.unit
+    def test_next_instance_derives_from_periods(self):
+        """next_instance derives SmartHabitInstance from periods when instances empty."""
+        import warnings
+        future_time = datetime(2099, 1, 15, 10, 0, tzinfo=timezone.utc)
+        habit = SmartHabit(
+            lineage_id=123,
+            calendar_id=1,
+            title="Test",
+            periods=[
+                SmartHabitPeriod(
+                    event_key="key1",
+                    series_id=123,
+                    start="2099-01-15",
+                    end="2099-01-15",
+                    event_start=future_time,
+                    event_end=datetime(2099, 1, 15, 11, 0, tzinfo=timezone.utc),
+                    event_status="PUBLISHED",
+                    locked=True,
+                ),
+            ],
+        )
+        # Should emit deprecation warning
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            instance = habit.next_instance
+            assert len(w) == 1
+            assert issubclass(w[0].category, DeprecationWarning)
+            assert "next_instance is deprecated" in str(w[0].message)
+
+        assert instance is not None
+        assert instance.event_id == "key1"
+        assert instance.calendar_id == 1
+        assert instance.start == future_time
+        assert instance.pinned is True
+
 
 class TestSmartHabitIntegration:
     """Integration tests for SmartHabit."""

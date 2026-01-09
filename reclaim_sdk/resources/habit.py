@@ -1,5 +1,3 @@
-import json
-
 from pydantic import BaseModel, Field, ConfigDict, PrivateAttr, model_validator, field_validator
 from datetime import datetime, timezone
 from typing import ClassVar, Dict, List, Optional, Any, Tuple
@@ -292,17 +290,41 @@ class SmartHabit(BaseModel):
 
     @property
     def next_instance(self) -> Optional[SmartHabitInstance]:
-        """Get the next scheduled instance (backward compatibility)."""
-        if not self.instances:
-            return None
+        """Get the next scheduled instance (backward compatibility).
 
-        now = datetime.now(timezone.utc)
-        future = [i for i in self.instances if i.start > now]
+        Note: This property is deprecated. Use next_period instead.
+        When instances is empty (new API), derives from periods.
+        """
+        import warnings
 
-        if future:
-            return min(future, key=lambda x: x.start)
+        # If we have legacy instances, use them
+        if self.instances:
+            now = datetime.now(timezone.utc)
+            future = [i for i in self.instances if i.start > now]
+            if future:
+                return min(future, key=lambda x: x.start)
+            return max(self.instances, key=lambda x: x.start) if self.instances else None
 
-        return max(self.instances, key=lambda x: x.start) if self.instances else None
+        # Derive from periods (new API)
+        if self.periods:
+            warnings.warn(
+                "next_instance is deprecated; use next_period instead",
+                DeprecationWarning,
+                stacklevel=2
+            )
+            next_p = self.next_period
+            if next_p and next_p.event_start and next_p.event_end:
+                # Convert period to instance for backward compatibility
+                return SmartHabitInstance(
+                    event_id=next_p.event_key,
+                    calendar_id=self.calendar_id,
+                    start=next_p.event_start,
+                    end=next_p.event_end,
+                    status=next_p.event_status,
+                    pinned=next_p.locked,
+                )
+
+        return None
 
     @property
     def instance_count(self) -> int:
@@ -468,11 +490,7 @@ class SmartHabit(BaseModel):
         if self._client is None:
             self._client = ReclaimClient()
 
-        # Enable endpoint may return empty response (valid success)
-        try:
-            self._client.post(f"{self.ENDPOINT}/{self.lineage_id}/enable")
-        except json.JSONDecodeError:
-            pass  # Endpoint succeeded but returned empty body
+        self._client.post(f"{self.ENDPOINT}/{self.lineage_id}/enable")
         self.status = HabitStatus.ACTIVE
 
     def disable(self) -> None:
@@ -480,11 +498,7 @@ class SmartHabit(BaseModel):
         if self._client is None:
             self._client = ReclaimClient()
 
-        # Disable endpoint may return empty response (valid success)
-        try:
-            self._client.delete(f"{self.ENDPOINT}/{self.lineage_id}/disable")
-        except json.JSONDecodeError:
-            pass  # Endpoint succeeded but returned empty body
+        self._client.delete(f"{self.ENDPOINT}/{self.lineage_id}/disable")
         self.status = HabitStatus.DISABLED
 
     def refresh(self) -> None:

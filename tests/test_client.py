@@ -3,8 +3,9 @@ Tests for ReclaimClient.
 """
 
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, Mock
 from datetime import datetime, timezone
+import httpx
 
 from reclaim_sdk.client import ReclaimClient, ReclaimClientConfig
 from reclaim_sdk.exceptions import (
@@ -50,6 +51,118 @@ class TestReclaimClientUnit:
         """Datetime encoder raises TypeError for non-datetime."""
         with pytest.raises(TypeError):
             ReclaimClient._datetime_encoder("not a datetime")
+
+    @pytest.mark.unit
+    def test_configure_with_base_url(self):
+        """Configure accepts custom base URL."""
+        # Reset singleton for test
+        ReclaimClient._instance = None
+        ReclaimClient._config = None
+
+        client = ReclaimClient.configure(
+            token="test-token",
+            base_url="https://custom.api.com"
+        )
+        assert client._config.base_url == "https://custom.api.com"
+
+        # Clean up
+        ReclaimClient._instance = None
+        ReclaimClient._config = None
+
+    @pytest.mark.unit
+    def test_request_handles_empty_200_response(self):
+        """Request returns empty dict for empty 200 response."""
+        # Reset singleton for test
+        ReclaimClient._instance = None
+        ReclaimClient._config = None
+
+        client = ReclaimClient.configure(token="test-token")
+
+        # Mock the session.request method
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.content = b""
+        mock_response.raise_for_status = Mock()
+
+        with patch.object(client.session, 'request', return_value=mock_response):
+            result = client.request("POST", "/api/test/enable")
+            assert result == {}
+
+        # Clean up
+        ReclaimClient._instance = None
+        ReclaimClient._config = None
+
+    @pytest.mark.unit
+    def test_request_handles_empty_204_response(self):
+        """Request returns empty dict for 204 No Content response."""
+        # Reset singleton for test
+        ReclaimClient._instance = None
+        ReclaimClient._config = None
+
+        client = ReclaimClient.configure(token="test-token")
+
+        # Mock the session.request method
+        mock_response = Mock()
+        mock_response.status_code = 204
+        mock_response.content = b""
+        mock_response.raise_for_status = Mock()
+
+        with patch.object(client.session, 'request', return_value=mock_response):
+            result = client.request("DELETE", "/api/test/disable")
+            assert result == {}
+
+        # Clean up
+        ReclaimClient._instance = None
+        ReclaimClient._config = None
+
+    @pytest.mark.unit
+    def test_request_parses_json_response(self):
+        """Request parses JSON response correctly."""
+        # Reset singleton for test
+        ReclaimClient._instance = None
+        ReclaimClient._config = None
+
+        client = ReclaimClient.configure(token="test-token")
+
+        # Mock the session.request method
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.content = b'{"id": 123, "title": "Test"}'
+        mock_response.raise_for_status = Mock()
+        mock_response.json = Mock(return_value={"id": 123, "title": "Test"})
+
+        with patch.object(client.session, 'request', return_value=mock_response):
+            result = client.request("GET", "/api/test")
+            assert result == {"id": 123, "title": "Test"}
+
+        # Clean up
+        ReclaimClient._instance = None
+        ReclaimClient._config = None
+
+    @pytest.mark.unit
+    def test_request_handles_list_response(self):
+        """Request handles list response correctly."""
+        # Reset singleton for test
+        ReclaimClient._instance = None
+        ReclaimClient._config = None
+
+        client = ReclaimClient.configure(token="test-token")
+
+        # Mock the session.request method
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.content = b'[{"id": 1}, {"id": 2}]'
+        mock_response.raise_for_status = Mock()
+        mock_response.json = Mock(return_value=[{"id": 1}, {"id": 2}])
+
+        with patch.object(client.session, 'request', return_value=mock_response):
+            result = client.request("GET", "/api/test/list")
+            assert result == [{"id": 1}, {"id": 2}]
+            assert isinstance(result, list)
+
+        # Clean up
+        ReclaimClient._instance = None
+        ReclaimClient._config = None
 
 
 class TestReclaimClientIntegration:

@@ -3,7 +3,7 @@ import os
 import json
 from datetime import datetime, timezone
 import httpx
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Union
 from reclaim_sdk.exceptions import (
     ReclaimAPIError,
     RecordNotFound,
@@ -46,14 +46,28 @@ class ReclaimClient:
     @classmethod
     def configure(cls, token: str, base_url: Optional[str] = None) -> "ReclaimClient":
         """Configure the ReclaimClient with the given token and optional base URL."""
-        config = ReclaimClientConfig(token=token)
+        if base_url:
+            config = ReclaimClientConfig(token=token, base_url=base_url)
+        else:
+            config = ReclaimClientConfig(token=token)
         cls._config = config
         if not cls._instance:
             cls._instance = super().__new__(cls)
         cls._instance._initialize()
         return cls._instance
 
-    def request(self, method: str, endpoint: str, **kwargs: Any) -> Dict[str, Any]:
+    def request(self, method: str, endpoint: str, **kwargs: Any) -> Union[Dict[str, Any], List[Any]]:
+        """
+        Make an HTTP request to the Reclaim API.
+
+        Args:
+            method: HTTP method (GET, POST, PUT, DELETE, PATCH)
+            endpoint: API endpoint path
+            **kwargs: Additional arguments passed to httpx
+
+        Returns:
+            Parsed JSON response (dict or list), or empty dict for empty 2xx responses
+        """
         if "json" in kwargs:
             kwargs["content"] = json.dumps(
                 kwargs.pop("json"), default=self._datetime_encoder
@@ -64,12 +78,11 @@ class ReclaimClient:
         try:
             response = self.session.request(method, endpoint, **kwargs)
             response.raise_for_status()
-            if (
-                method.upper() == "DELETE"
-                and response.status_code in (204, 200)
-                and not response.content
-            ):
+
+            # Handle empty 2xx responses for any method (not just DELETE)
+            if response.status_code in (200, 201, 202, 204) and not response.content:
                 return {}
+
             return response.json()
         except httpx.HTTPStatusError as e:
             error_data = (
@@ -98,17 +111,17 @@ class ReclaimClient:
             f"Object of type {obj.__class__.__name__} is not JSON serializable"
         )
 
-    def get(self, endpoint: str, **kwargs: Any) -> Dict[str, Any]:
+    def get(self, endpoint: str, **kwargs: Any) -> Union[Dict[str, Any], List[Any]]:
         return self.request("GET", endpoint, **kwargs)
 
-    def post(self, endpoint: str, **kwargs: Any) -> Dict[str, Any]:
+    def post(self, endpoint: str, **kwargs: Any) -> Union[Dict[str, Any], List[Any]]:
         return self.request("POST", endpoint, **kwargs)
 
-    def put(self, endpoint: str, **kwargs: Any) -> Dict[str, Any]:
+    def put(self, endpoint: str, **kwargs: Any) -> Union[Dict[str, Any], List[Any]]:
         return self.request("PUT", endpoint, **kwargs)
 
-    def delete(self, endpoint: str, **kwargs: Any) -> Dict[str, Any]:
+    def delete(self, endpoint: str, **kwargs: Any) -> Union[Dict[str, Any], List[Any]]:
         return self.request("DELETE", endpoint, **kwargs)
 
-    def patch(self, endpoint: str, **kwargs: Any) -> Dict[str, Any]:
+    def patch(self, endpoint: str, **kwargs: Any) -> Union[Dict[str, Any], List[Any]]:
         return self.request("PATCH", endpoint, **kwargs)
